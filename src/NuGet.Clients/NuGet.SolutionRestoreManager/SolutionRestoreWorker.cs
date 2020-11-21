@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
@@ -430,6 +431,8 @@ namespace NuGet.SolutionRestoreManager
             // Hops onto a background pool thread
             await TaskScheduler.Default;
 
+            var nominatedProjects = new List<string>();
+            string restoreReason = default;
             var status = false;
             // Check if the solution is fully loaded
             while (!_solutionLoadedEvent.IsSet)
@@ -458,6 +461,7 @@ namespace NuGet.SolutionRestoreManager
                     // if no pending restore requests then shut down the restore job runner.
                     if (_pendingRequests.Value.Count == 0)
                     {
+                        restoreReason = "No pending restores";
                         break;
                     }
                 }
@@ -470,6 +474,11 @@ namespace NuGet.SolutionRestoreManager
                         // Blocks the execution until first request is scheduled
                         // Monitors the cancelllation token as well.
                         var request = _pendingRequests.Value.Take(token);
+
+                        if (request.RestoreSource == RestoreOperationSource.Implicit)
+                        {
+                            nominatedProjects.Add(request.Project);
+                        }
 
                         token.ThrowIfCancellationRequested();
 
@@ -499,7 +508,12 @@ namespace NuGet.SolutionRestoreManager
 
                                 if (isAllProjectsNominated)
                                 {
+<<<<<<< HEAD
                                     // if we've got all the nominations then continue with the auto 
+=======
+                                    // if we've got all the nominations then continue with the auto restore
+                                    restoreReason = "All projects nominated. Queue drained";
+>>>>>>> 5f3b4c479 (Add additional solution load telemetry)
                                     break;
                                 }
                                 else
@@ -507,6 +521,7 @@ namespace NuGet.SolutionRestoreManager
                                     // Break if we've waited for more than 10s without an actual nomination.
                                     if (lastNominationReceived.AddMilliseconds(MaxIdleWaitTimeMs) < DateTime.UtcNow)
                                     {
+                                        restoreReason = $"Waited for more than 10s, {lastNominationReceived} {DateTime.UtcNow}";
                                         break;
                                     }
                                     await Task.Delay(IdleTimeoutMs, token);
@@ -514,6 +529,11 @@ namespace NuGet.SolutionRestoreManager
                             }
                             else
                             {
+                                if (next.RestoreSource == RestoreOperationSource.Implicit)
+                                {
+                                    nominatedProjects.Add(next.Project);
+                                }
+
                                 lastNominationReceived = DateTime.UtcNow;
                                 // Upgrade request if necessary
                                 if (next != null && next.RestoreSource != request.RestoreSource)
@@ -522,7 +542,8 @@ namespace NuGet.SolutionRestoreManager
                                     // Explicit is always preferred.
                                     request = new SolutionRestoreRequest(
                                         next.ForceRestore || request.ForceRestore,
-                                        RestoreOperationSource.Explicit);
+                                        RestoreOperationSource.Explicit,
+                                        "Explicit");
 
                                     // we don't want to delay explicit solution restore request so just break at this time.
                                     break;
@@ -540,6 +561,13 @@ namespace NuGet.SolutionRestoreManager
                         token.ThrowIfCancellationRequested();
 
                         // Runs restore job with scheduled request params
+                        NuGet.Common.TelemetryActivity.EmitTelemetryEvent(
+                            new RestoreStartEvent(
+                                "restoretrigger",
+                                nominatedProjects,
+                                DateTime.UtcNow,
+                                restoreReason));
+
                         status = await ProcessRestoreRequestAsync(restoreOperation, request, bulkFileOperation, token);
 
                         // Repeats...
