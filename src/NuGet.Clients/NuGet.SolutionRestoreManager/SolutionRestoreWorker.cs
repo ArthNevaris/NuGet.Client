@@ -3,7 +3,9 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.ComponentModel.Composition;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -400,7 +402,7 @@ namespace NuGet.SolutionRestoreManager
                     {
                         await PromoteTaskToActiveAsync(restoreOperation, token);
 
-                        var result = await ProcessRestoreRequestAsync(restoreOperation, request, token);
+                        var result = await ProcessRestoreRequestAsync(restoreOperation, request, null, token);
 
                         return result;
                     }
@@ -478,7 +480,11 @@ namespace NuGet.SolutionRestoreManager
                         token.ThrowIfCancellationRequested();
                         DateTime lastNominationReceived = DateTime.UtcNow;
 
+                        BulkFileOperation bulkFileOperation = ExperimentalFeatures.IsEnabled(ExperimentalFeatures.BulkFileOperationGlobal) ?
+                                            await StartBulkFileOperation(new List<string>(), new List<string>(), token) :
+                                            null;
                         // Drains the queue
+                        // Ensure that there's no other operations happening.
                         while (!_pendingRequests.Value.IsCompleted
                             && !token.IsCancellationRequested)
                         {
@@ -490,9 +496,10 @@ namespace NuGet.SolutionRestoreManager
                             // Try to get a request without a timeout. We don't want to *block* the threadpool thread.
                             if (!_pendingRequests.Value.TryTake(out next, millisecondsTimeout: 0, token))
                             {
+
                                 if (isAllProjectsNominated)
                                 {
-                                    // if we've got all the nominations then continue with the auto restore
+                                    // if we've got all the nominations then continue with the auto 
                                     break;
                                 }
                                 else
@@ -533,7 +540,7 @@ namespace NuGet.SolutionRestoreManager
                         token.ThrowIfCancellationRequested();
 
                         // Runs restore job with scheduled request params
-                        status = await ProcessRestoreRequestAsync(restoreOperation, request, token);
+                        status = await ProcessRestoreRequestAsync(restoreOperation, request, bulkFileOperation, token);
 
                         // Repeats...
                     }
@@ -553,9 +560,17 @@ namespace NuGet.SolutionRestoreManager
             return status;
         }
 
+        private static async Task<BulkFileOperation> StartBulkFileOperation(List<string> changingFiles, List<string> changingFolders, CancellationToken token)
+        {
+            await NuGetUIThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var bulkFileOperation = await BulkFileOperation.QueryBulkFileOperationAsync(changingFiles, changingFolders, token);
+            return bulkFileOperation;
+        }
+
         private async Task<bool> ProcessRestoreRequestAsync(
             BackgroundRestoreOperation restoreOperation,
             SolutionRestoreRequest request,
+            BulkFileOperation bulkFileOperation,
             CancellationToken token)
         {
             // if the request is implicit & this is the first restore, assume we are restoring due to a solution load.
@@ -565,6 +580,11 @@ namespace NuGet.SolutionRestoreManager
 
             // Start the restore job in a separate task on a background thread
             // it will switch into main thread when necessary.
+            if (bulkFileOperation != null)
+            {
+                // TODO NK - This could throw.
+                await bulkFileOperation.BeginAsync(token);
+            }
             var joinableTask = JoinableTaskFactory.RunAsync(
             () => StartRestoreJobAsync(request, isSolutionLoadRestore, token));
 
@@ -572,7 +592,14 @@ namespace NuGet.SolutionRestoreManager
                 .Task
                 .ContinueWith(t => restoreOperation.ContinuationAction(t, JoinableTaskFactory));
 
-            return await joinableTask;
+            var result = await joinableTask;
+            if (bulkFileOperation != null)
+            {
+                await bulkFileOperation.EndAsync();
+                bulkFileOperation.Dispose();
+            }
+
+            return result;
         }
 
         private async Task PromoteTaskToActiveAsync(BackgroundRestoreOperation restoreOperation, CancellationToken token)
