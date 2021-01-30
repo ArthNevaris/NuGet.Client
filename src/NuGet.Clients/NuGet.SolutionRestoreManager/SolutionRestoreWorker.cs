@@ -508,12 +508,8 @@ namespace NuGet.SolutionRestoreManager
 
                                 if (isAllProjectsNominated)
                                 {
-<<<<<<< HEAD
-                                    // if we've got all the nominations then continue with the auto 
-=======
                                     // if we've got all the nominations then continue with the auto restore
                                     restoreReason = "All projects nominated. Queue drained";
->>>>>>> 5f3b4c479 (Add additional solution load telemetry)
                                     break;
                                 }
                                 else
